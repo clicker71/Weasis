@@ -149,13 +149,14 @@ class UpsCommandsTest {
   }
 
   private static String outputsBody() {
+    // PS3.3 Table C.30.3-1: the outputs hang off the single (0074,1216) performed item, each
+    // naming (0008,1150)/(0008,1155) directly - the same shape clinfer writes.
     return """
     [{
       "00080018": {"vr": "UI", "Value": ["%s"]},
-      "00404033": {"vr": "SQ", "Value": [{
-        "0020000E": {"vr": "UI", "Value": ["1.2.3.4"]},
-        "00081199": {"vr": "SQ", "Value": [{
-          "00081150": {"vr": "UI", "Value": ["1.2.840.10008.5.1.4.1.1.481.3"]},
+      "00741216": {"vr": "SQ", "Value": [{
+        "00404033": {"vr": "SQ", "Value": [{
+          "00081150": {"vr": "UI", "Value": ["1.2.840.10008.5.1.4.1.1.11.1"]},
           "00081155": {"vr": "UI", "Value": ["1.2.3.4.5"]}
         }]}
       }]}
@@ -338,8 +339,7 @@ class UpsCommandsTest {
     String body = printed();
     assertAll(
         () -> assertTrue(body.contains("1.2.3.4.5"), body),
-        () -> assertTrue(body.contains("1.2.3.4"), body),
-        () -> assertTrue(body.contains("1.2.840.10008.5.1.4.1.1.481.3"), body));
+        () -> assertTrue(body.contains("1.2.840.10008.5.1.4.1.1.11.1"), body));
   }
 
   @Test

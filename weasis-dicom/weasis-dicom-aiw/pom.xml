@@ -29,6 +29,14 @@
     </plugins>
   </build>
   <dependencies>
+    <!-- The badge and menu extension points live in the core and the explorer, and are provided by
+         the host: the module registers services against them, it does not ship them. -->
+    <dependency>
+      <groupId>org.weasis.core</groupId>
+      <artifactId>weasis-core</artifactId>
+      <version>${project.parent.version}</version>
+      <scope>provided</scope>
+    </dependency>
     <!-- The UPS-RS client (PS3.18 §11) lives with the DICOMweb services, not with the codec -->
     <dependency>
       <groupId>org.weasis</groupId>
@@ -39,6 +47,13 @@
     <dependency>
       <groupId>org.weasis.dicom</groupId>
       <artifactId>weasis-dicom-explorer</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <!-- The DICOM tag dictionary and the series model (TagD, DicomSeries, DicomImageElement) -->
+    <dependency>
+      <groupId>org.weasis.dicom</groupId>
+      <artifactId>weasis-dicom-codec</artifactId>
       <version>${project.version}</version>
       <scope>provided</scope>
     </dependency>

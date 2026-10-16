@@ -208,28 +208,48 @@ public class UpsService {
    * §11.5, RAD-83). A Task Requestor never writes that sequence - the performer fills it when it
    * COMPLETES the task - so this is read-only.
    *
-   * @return the referenced instances, one entry per series, keyed by Series Instance UID
+   * <p>The sequence lives INSIDE the Unified Procedure Step Performed Procedure Sequence
+   * (0074,1216), not at the top level of the workitem: PS3.3 Table C.30.3-1 nests the performed
+   * attributes under that one item, and a conformant origin refuses the top-level form. Reading it
+   * at the top level therefore finds nothing, which is the defect this reads around.
+   *
+   * <p>Each (0040,4033) item IS the reference: it carries (0008,1150) Referenced SOP Class UID and
+   * (0008,1155) Referenced SOP Instance UID directly (PS3.3 Table C.30.3-1b), as a performer like
+   * clinfer writes them and as Clarus serves them. PS3.3 does not put (0020000E) Series Instance
+   * UID in that item, so an item is grouped under the empty key rather than dropped - dropping it
+   * would report "no results" for a completion that stored them.
+   *
+   * @return the referenced instances, one entry per series, keyed by Series Instance UID (the empty
+   *     key when the performer named no series)
    */
   public Map<String, List<Attributes>> loadOutputs(String workitemUid)
       throws IOException, InterruptedException {
     Attributes workitem = client.retrieveWorkitem(Objects.requireNonNull(workitemUid));
     Map<String, List<Attributes>> outputs = new LinkedHashMap<>();
-    Sequence items = workitem.getSequence(Tag.OutputInformationSequence);
+    Sequence items = outputs(workitem);
     if (items == null) {
       return outputs;
     }
     for (Attributes item : items) {
-      String seriesUid = item.getString(Tag.SeriesInstanceUID);
-      if (seriesUid == null) {
+      // An item that carries the reference itself is the common case; one that wraps it in a
+      // Referenced SOP Sequence (0008,1199) is accepted too, since the standard's sequence form
+      // names the same two attributes one level down.
+      Sequence referenced = item.getSequence(Tag.ReferencedSOPSequence);
+      List<Attributes> sops = new ArrayList<>();
+      if (referenced != null && !referenced.isEmpty()) {
+        for (Attributes sop : referenced) {
+          sops.add(sop);
+        }
+      } else if (item.getString(Tag.ReferencedSOPInstanceUID) != null) {
+        sops.add(item);
+      }
+      if (sops.isEmpty()) {
         continue;
       }
-      Sequence referenced = item.getSequence(Tag.ReferencedSOPSequence);
-      List<Attributes> instances = outputs.computeIfAbsent(seriesUid, k -> new ArrayList<>());
-      if (referenced != null) {
-        for (Attributes sop : referenced) {
-          instances.add(sop);
-        }
-      }
+      String seriesUid = item.getString(Tag.SeriesInstanceUID);
+      outputs
+          .computeIfAbsent(seriesUid == null ? "" : seriesUid, k -> new ArrayList<>())
+          .addAll(sops);
     }
     return outputs;
   }
@@ -264,7 +284,22 @@ public class UpsService {
 
   /** Whether the workitem names results in its Output Information Sequence (0040,4033). */
   public static boolean hasOutputs(Attributes workitem) {
-    Sequence items = workitem.getSequence(Tag.OutputInformationSequence);
+    Sequence items = outputs(workitem);
     return items != null && !items.isEmpty();
+  }
+
+  /**
+   * The Output Information Sequence (0040,4033) of a workitem, read from where PS3.3 Table C.30.3-1
+   * puts it: the performed attributes are one item of the Unified Procedure Step Performed
+   * Procedure Sequence (0074,1216), and the outputs hang off that item. A workitem without the
+   * performed sequence, or with an empty first item, names no results - which is the same absence
+   * the top-level read used to report, only read from the conformant place.
+   */
+  private static Sequence outputs(Attributes workitem) {
+    Sequence performed = workitem.getSequence(Tag.UnifiedProcedureStepPerformedProcedureSequence);
+    if (performed == null || performed.isEmpty()) {
+      return null;
+    }
+    return performed.get(0).getSequence(Tag.OutputInformationSequence);
   }
 }

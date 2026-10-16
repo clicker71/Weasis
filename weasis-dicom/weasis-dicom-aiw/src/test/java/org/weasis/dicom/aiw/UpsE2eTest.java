@@ -11,6 +11,7 @@ package org.weasis.dicom.aiw;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -19,6 +20,8 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import org.dcm4che3.data.Attributes;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayNameGeneration;
@@ -134,6 +137,78 @@ class UpsE2eTest {
   @Test
   void the_task_requestor_cycle_holds_on_the_second_origin() throws Exception {
     cycle(property("weasis.ups.e2e.urlB", null));
+  }
+
+  /**
+   * The phase-2 attach: the rows the badge is derived from are built from a real Search (PS3.18
+   * §11.9), so the state-to-badge rule is exercised on what an origin actually returns, not on a
+   * fixture. Only the rows and the rule are asserted; the Swing hooks stay out of a headless run.
+   */
+  @Test
+  void the_state_of_a_created_task_flips_the_badge_on_both_origins() throws Exception {
+    String url = property("weasis.ups.e2e.urlA", null);
+    assertNotNull(url, "The origin URL is required");
+    String studyUid = property("weasis.ups.e2e.study", "1.2.3");
+    UpsCommands commands = new UpsCommands();
+
+    // Create the task so the study has a pending workitem to observe.
+    output.reset();
+    commands.run(runArgs(url, studyUid));
+    assertNotNull(uidOf(printed()), "Create must return the workitem UID: " + printed());
+
+    // Read the worklist the way the state refresh does, then apply the badge rule.
+    output.reset();
+    commands.search(new String[] {"--url", url, studyUid});
+    assertTrue(printed().contains(CODE), printed());
+
+    List<Attributes> workitems =
+        UpsExplorerState.service(originOf(url)).search(studyUid, null, null);
+    java.util.Set<org.weasis.core.api.util.ResourceUtil.ResourceIconPath> badges =
+        UpsExplorerState.badgesOf(UpsExplorerState.rows(workitems), false);
+    assertTrue(
+        badges.contains(org.weasis.core.api.util.ResourceUtil.OtherIcon.AI_TASK),
+        "a SCHEDULED workitem shows the task badge: " + badges);
+
+    // The "available, not yet run" half against the live origin: a study with no workitem of its
+    // own shows the robot because AI is offered here, which is what a fresh eligible study paints.
+    List<Attributes> none =
+        UpsExplorerState.service(originOf(url)).search("2.25.0.0.0.0.0.0.0.0.0.0", null, null);
+    assertTrue(none.isEmpty(), "an unknown study lists no workitem: " + none);
+    java.util.Set<org.weasis.core.api.util.ResourceUtil.ResourceIconPath> fresh =
+        UpsExplorerState.badgesOf(UpsExplorerState.rows(none), true);
+    assertTrue(
+        fresh.contains(org.weasis.core.api.util.ResourceUtil.OtherIcon.AI_TASK),
+        "an available study with no workitem shows the task badge: " + fresh);
+  }
+
+  /** The DICOMweb origin a URL names, for the state service of the phase-2 leg. */
+  private static org.weasis.dicom.explorer.DicomWebOrigin originOf(String url) {
+    return new org.weasis.dicom.explorer.DicomWebOrigin(url, null, null);
+  }
+
+  /**
+   * The outputs of a COMPLETED workitem, read live: PS3.3 Table C.30.3-1 nests the Output
+   * Information Sequence (0040,4033) inside the Unified Procedure Step Performed Procedure Sequence
+   * (0074,1216), so a reader that looks at the top level finds nothing. This leg proves the reader
+   * finds what the performer stored.
+   *
+   * <p>Gated on a second property, the UID of a COMPLETED workitem with results: {@code
+   * -Dweasis.ups.e2e.completed=2.25....}
+   */
+  @Test
+  void the_outputs_of_a_completed_workitem_are_read_from_the_performed_item() throws Exception {
+    String url = property("weasis.ups.e2e.urlA", null);
+    String workitemUid = property("weasis.ups.e2e.completed", null);
+    assertAll(
+        () -> assertNotNull(url, "The origin URL is required"),
+        () -> assertNotNull(workitemUid, "A COMPLETED workitem UID is required"));
+
+    UpsService service = UpsExplorerState.service(originOf(url));
+    Map<String, List<Attributes>> outputs = service.loadOutputs(workitemUid);
+    assertFalse(outputs.isEmpty(), "a COMPLETED workitem names its results: " + outputs);
+    assertTrue(
+        outputs.values().stream().allMatch(instances -> !instances.isEmpty()),
+        "every series names at least one instance: " + outputs);
   }
 
   /**

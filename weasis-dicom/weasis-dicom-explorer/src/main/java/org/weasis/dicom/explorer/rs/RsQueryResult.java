@@ -66,7 +66,7 @@ public class RsQueryResult extends AbstractQueryResult {
       multiParams(
           "&includefield=00080020,00080030,00080050,00080061,00080090,00081030,00100010,00100020,00100021,00100030,00100040,0020000D,00200010");
   public static final String SERIES_QUERY =
-      multiParams("0008103E,00080060,0020000E,00200011,00081190,00201209");
+      multiParams("0008103E,00080060,0020000E,00200011,00081190,00201209,00180015");
   public static final String INSTANCE_QUERY = multiParams("00080018,00200013,00081190");
   public static final String QIDO_REQUEST = "QIDO-RS request: {}"; // NON-NLS
 
@@ -622,6 +622,7 @@ public class RsQueryResult extends AbstractQueryResult {
               Tag.Modality,
               Tag.SeriesNumber,
               Tag.SeriesDescription,
+              Tag.BodyPartExamined,
               Tag.RetrieveURL,
               Tag.NumberOfSeriesRelatedInstances);
       for (TagW tag : tags) {

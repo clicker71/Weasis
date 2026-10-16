@@ -27,7 +27,6 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.dcm4che3.data.Attributes;
 import org.dcm4che3.data.Code;
-import org.dcm4che3.data.Sequence;
 import org.dcm4che3.data.Tag;
 import org.dcm4che3.data.VR;
 import org.junit.jupiter.api.AfterEach;
@@ -56,6 +55,7 @@ class UpsServiceTest {
   private volatile String searchBody = "[]";
   private volatile int searchStatus = 200;
   private volatile String createLocation = "/workitems/" + WORKITEM_UID;
+  private volatile String outputBody = outputBodyWithoutSeries();
 
   @BeforeEach
   void startServer() throws IOException {
@@ -76,7 +76,7 @@ class UpsServiceTest {
       lastQuery.add(exchange.getRequestURI().getRawQuery());
       if (itemPath) {
         // An output list, for the Retrieve Workitem path (PS3.18 §11.5)
-        respond(exchange, 200, outputBody());
+        respond(exchange, 200, outputBody);
       } else {
         respond(exchange, searchStatus, searchBody);
       }
@@ -157,14 +157,33 @@ class UpsServiceTest {
         .formatted(STUDY_UID, WORKITEM_UID, state, codeValue);
   }
 
-  private static String outputBody() {
+  private static String outputBodyWithoutSeries() {
+    // The live clinfer/Clarus shape: (0074,1216) -> item -> (0040,4033) -> item with only
+    // (0008,1150)/(0008,1155). PS3.3 Table C.30.3-1 does not require (0020000E) here, and a
+    // performer does not write it, so the reader must keep these instances without a series key.
     return """
     [{
       "00080018": {"vr": "UI", "Value": ["%s"]},
-      "00404033": {"vr": "SQ", "Value": [{
-        "0020000E": {"vr": "UI", "Value": ["1.2.3.4"]},
-        "00081199": {"vr": "SQ", "Value": [{
-          "00081150": {"vr": "UI", "Value": ["1.2.840.10008.5.1.4.1.1.481.3"]},
+      "00741216": {"vr": "SQ", "Value": [{
+        "00404033": {"vr": "SQ", "Value": [{
+          "00081150": {"vr": "UI", "Value": ["1.2.840.10008.5.1.4.1.1.11.1"]},
+          "00081155": {"vr": "UI", "Value": ["1.2.3.4.5"]}
+        }]}
+      }]}
+    }]
+    """
+        .formatted(WORKITEM_UID);
+  }
+
+  /** The same shape with an explicit (0020000E), which some origins do include. */
+  private static String outputBodyWithSeries() {
+    return """
+    [{
+      "00080018": {"vr": "UI", "Value": ["%s"]},
+      "00741216": {"vr": "SQ", "Value": [{
+        "00404033": {"vr": "SQ", "Value": [{
+          "0020000E": {"vr": "UI", "Value": ["1.2.3.4"]},
+          "00081150": {"vr": "UI", "Value": ["1.2.840.10008.5.1.4.1.1.11.1"]},
           "00081155": {"vr": "UI", "Value": ["1.2.3.4.5"]}
         }]}
       }]}
@@ -267,10 +286,25 @@ class UpsServiceTest {
   }
 
   @Test
-  void load_outputs_groups_the_referenced_instances_by_series() throws Exception {
+  void load_outputs_lists_the_referenced_instances_without_a_series_uid() throws Exception {
+    // The live shape: (0040,4033) items carry only (0008,1150)/(0008,1155), so they group under
+    // the empty key. Dropping them would report "no results" for a completion that stored them.
     Map<String, List<Attributes>> outputs = service().loadOutputs(WORKITEM_UID);
     assertAll(
-        () -> assertEquals(1, outputs.size()),
+        () -> assertEquals(1, outputs.size(), outputs.toString()),
+        () -> assertTrue(outputs.containsKey(""), outputs.toString()),
+        () -> assertEquals(1, outputs.get("").size()),
+        () ->
+            assertEquals(
+                "1.2.3.4.5", outputs.get("").get(0).getString(Tag.ReferencedSOPInstanceUID)));
+  }
+
+  @Test
+  void load_outputs_groups_by_series_when_the_performer_names_one() throws Exception {
+    outputBody = outputBodyWithSeries();
+    Map<String, List<Attributes>> outputs = service().loadOutputs(WORKITEM_UID);
+    assertAll(
+        () -> assertEquals(1, outputs.size(), outputs.toString()),
         () -> assertEquals(1, outputs.get("1.2.3.4").size()),
         () ->
             assertEquals(
@@ -285,22 +319,48 @@ class UpsServiceTest {
 
   @Test
   void has_outputs_tells_a_ready_task_from_a_running_one() {
+    // The outputs live inside the performed sequence (0074,1216), not at the top level.
     Attributes withOutputs = new Attributes();
-    Sequence sequence = withOutputs.newSequence(Tag.OutputInformationSequence, 1);
-    sequence.add(new Attributes());
+    Attributes performedItem = new Attributes();
+    performedItem.newSequence(Tag.OutputInformationSequence, 1).add(new Attributes());
+    withOutputs
+        .newSequence(Tag.UnifiedProcedureStepPerformedProcedureSequence, 1)
+        .add(performedItem);
+
+    Attributes withEmptyOutputs = new Attributes();
+    Attributes emptyItem = new Attributes();
+    emptyItem.newSequence(Tag.OutputInformationSequence, 0);
+    withEmptyOutputs
+        .newSequence(Tag.UnifiedProcedureStepPerformedProcedureSequence, 1)
+        .add(emptyItem);
+
+    Attributes withEmptyPerformed = new Attributes();
+    withEmptyPerformed.newSequence(Tag.UnifiedProcedureStepPerformedProcedureSequence, 1);
 
     assertAll(
         () -> assertTrue(UpsService.hasOutputs(withOutputs)),
         () -> assertFalse(UpsService.hasOutputs(new Attributes())),
-        () ->
-            assertFalse(
-                UpsService.hasOutputs(newWithEmptySequence(Tag.OutputInformationSequence))));
+        // The performed sequence is present but the outputs are absent or empty: no results.
+        () -> assertFalse(UpsService.hasOutputs(withEmptyOutputs)),
+        () -> assertFalse(UpsService.hasOutputs(withEmptyPerformed)));
   }
 
-  private static Attributes newWithEmptySequence(int tag) {
-    Attributes attrs = new Attributes();
-    attrs.newSequence(tag, 0);
-    return attrs;
+  @Test
+  void the_performed_item_is_what_makes_a_workitem_ready() {
+    Attributes workitem = new Attributes();
+    Attributes performedItem = new Attributes();
+    performedItem.newSequence(Tag.OutputInformationSequence, 1).add(new Attributes());
+    workitem.newSequence(Tag.UnifiedProcedureStepPerformedProcedureSequence, 1).add(performedItem);
+    assertTrue(UpsService.hasOutputs(workitem));
+  }
+
+  @Test
+  void a_top_level_output_sequence_alone_names_nothing() {
+    // The defect the reader avoids: a workitem whose (0040,4033) sits at the top level, where a
+    // conformant origin never puts it, is read as naming no results - not as a wrong listing.
+    Attributes topLevel = new Attributes();
+    topLevel.newSequence(Tag.OutputInformationSequence, 1).add(new Attributes());
+    assertFalse(UpsService.hasOutputs(topLevel));
   }
 
   @Test

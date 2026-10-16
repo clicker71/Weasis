@@ -181,6 +181,8 @@ public class ResourceUtil {
     AUDIO("svg/other/audio.svg"), // NON-NLS
     /** Thumbnail badge: an AI task (UPS workitem) of the study is SCHEDULED or IN PROGRESS. */
     AI_TASK("svg/other/aiTask.svg"), // NON-NLS
+    /** Thumbnail badge: an AI task of the study has a workitem IN PROGRESS (the clock). */
+    AI_PROGRESS("svg/other/aiProgress.svg"), // NON-NLS
     /** Thumbnail badge: an AI task of the study is COMPLETED, its results are ready to open. */
     AI_RESULT("svg/other/aiResult.svg"), // NON-NLS
     CALENDAR("svg/other/calendar.svg"), // NON-NLS
