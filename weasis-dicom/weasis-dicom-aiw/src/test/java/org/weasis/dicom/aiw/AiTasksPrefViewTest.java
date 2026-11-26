@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import org.dcm4che3.data.Code;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayNameGeneration;
 import org.junit.jupiter.api.DisplayNameGenerator.ReplaceUnderscores;
 import org.junit.jupiter.api.Test;
@@ -27,6 +28,7 @@ import org.weasis.dicom.aiw.pref.AiTasksPrefView;
 class AiTasksPrefViewTest {
 
   @TempDir Path folder;
+  private Path installed;
 
   private static Node node(String id, String url) {
     return new Node(
@@ -42,7 +44,7 @@ class AiTasksPrefViewTest {
 
   @Test
   void restore_then_close_keeps_the_saved_servers() throws IOException {
-    UpsNodes.install(folder.resolve("upsNodes.json"));
+    installed = UpsNodes.install(folder.resolve("upsNodes.json"));
     UpsNodes.save(List.of(node("pacs", null), node("byUrl", "https://b/rs")));
 
     AiTasksPrefView view = new AiTasksPrefView();
@@ -50,5 +52,10 @@ class AiTasksPrefViewTest {
     view.closeAdditionalWindow();
 
     assertEquals(2, UpsNodes.all().size(), "Restore must not persist an emptied server list");
+  }
+
+  @AfterEach
+  void restoreDocument() {
+    UpsNodes.restore(installed);
   }
 }

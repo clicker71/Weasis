@@ -137,7 +137,7 @@ public class UpsService {
       // (0040,A370) is a Required matching key (PS3.4 Table CC.2.5-3), so a conformant origin
       // already filtered on it. The guard is cheap insurance against a lax origin that answers
       // every study's workitems, which would otherwise suppress the Create of this study.
-      if (!studyUid.equals(referencedStudyUid(workitem))) {
+      if (!referencesStudy(workitem, studyUid)) {
         continue;
       }
       String state = workitem.getString(Tag.ProcedureStepState);
@@ -148,13 +148,22 @@ public class UpsService {
     return Optional.empty();
   }
 
-  /** The study a workitem belongs to, through its Referenced Request Sequence (0040,A370). */
-  private static String referencedStudyUid(Attributes workitem) {
+  /**
+   * Whether the workitem references {@code studyUid} in any item of its Referenced Request Sequence
+   * (0040,A370): the sequence may hold several requests (PS3.3 C.30.4), so the study must match any
+   * of them, not only the first.
+   */
+  private static boolean referencesStudy(Attributes workitem, String studyUid) {
     Sequence request = workitem.getSequence(Tag.ReferencedRequestSequence);
     if (request == null || request.isEmpty()) {
-      return null;
+      return false;
     }
-    return request.get(0).getString(Tag.StudyInstanceUID);
+    for (Attributes item : request) {
+      if (studyUid.equals(item.getString(Tag.StudyInstanceUID))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** SCHEDULED and IN PROGRESS are the two states a Task Requestor still has to reckon with. */

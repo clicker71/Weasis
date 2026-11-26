@@ -18,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import org.dcm4che3.data.Code;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayNameGeneration;
 import org.junit.jupiter.api.DisplayNameGenerator.ReplaceUnderscores;
 import org.junit.jupiter.api.Test;
@@ -30,6 +31,7 @@ import org.weasis.dicom.explorer.DicomWebOrigin;
 class UpsNodesTest {
 
   @TempDir Path folder;
+  private Path installed;
 
   private static Node node(String id, String url, boolean enabled) {
     return new Node(
@@ -43,10 +45,15 @@ class UpsNodesTest {
         List.of(new Code("CT-ORGAN-SEG", "99SITE", null, "Organ segmentation")));
   }
 
+  @AfterEach
+  void restoreDocument() {
+    UpsNodes.restore(installed);
+  }
+
   @Test
   void what_is_saved_is_read_back_and_a_server_left_out_is_removed() throws IOException {
     Path file = folder.resolve("upsNodes.json");
-    UpsNodes.install(file);
+    installed = UpsNodes.install(file);
     UpsNodes.save(List.of(node("pacs", null, true), node("https://b/rs", "https://b/rs/", false)));
 
     List<Node> all = UpsNodes.all();
@@ -65,7 +72,7 @@ class UpsNodesTest {
 
   @Test
   void a_study_is_served_by_the_enabled_entry_whose_node_or_url_is_its_origin() throws IOException {
-    UpsNodes.install(folder.resolve("upsNodes.json"));
+    installed = UpsNodes.install(folder.resolve("upsNodes.json"));
     UpsNodes.save(
         List.of(
             node("pacs", null, true),
@@ -91,6 +98,24 @@ class UpsNodesTest {
         () ->
             assertTrue(
                 UpsNodes.forOrigin(new DicomWebOrigin("https://z/rs", null, null)).isEmpty()));
+  }
+
+  @Test
+  void install_is_reversible_and_reads_the_previous_document_again() throws IOException {
+    Path first = folder.resolve("first.json");
+    Path second = folder.resolve("second.json");
+    Files.writeString(first, "{\"nodes\": [{\"id\": \"first\", \"enabled\": true}]}");
+    Files.writeString(second, "{\"nodes\": [{\"id\": \"second\", \"enabled\": true}]}");
+
+    installed = UpsNodes.install(first);
+    assertEquals(List.of("first"), UpsNodes.all().stream().map(Node::id).toList());
+    Path previous = UpsNodes.install(second);
+    assertEquals(List.of("second"), UpsNodes.all().stream().map(Node::id).toList());
+    UpsNodes.restore(previous);
+    assertEquals(
+        List.of("first"),
+        UpsNodes.all().stream().map(Node::id).toList(),
+        "restore reads the document that was in force before");
   }
 
   @Test

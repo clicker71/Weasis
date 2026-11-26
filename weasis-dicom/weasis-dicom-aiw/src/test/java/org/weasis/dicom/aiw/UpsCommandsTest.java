@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -38,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -51,6 +53,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayNameGeneration;
 import org.junit.jupiter.api.DisplayNameGenerator.ReplaceUnderscores;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.weasis.core.api.command.CommandModel;
 import org.weasis.core.api.command.CommandResult;
@@ -80,6 +83,7 @@ class UpsCommandsTest {
   private static final String WORKITEM_UID = "1.2.826.0.1.3680043.8.498.99";
 
   @TempDir Path folder;
+  private Path upsNodesPrevious;
 
   private HttpServer server;
   private final List<String> requests = new ArrayList<>();
@@ -110,6 +114,11 @@ class UpsCommandsTest {
   @AfterEach
   void stopServer() {
     server.stop(0);
+  }
+
+  @AfterEach
+  void restoreNodes() {
+    UpsNodes.restore(upsNodesPrevious);
   }
 
   private void handle(HttpExchange exchange) throws IOException {
@@ -237,7 +246,7 @@ class UpsCommandsTest {
                        "meaning": "Organ segmentation"}]}]}
         """
             .formatted(url(), writeAllowed));
-    UpsNodes.install(document);
+    upsNodesPrevious = UpsNodes.install(document);
     return model;
   }
 
@@ -266,13 +275,19 @@ class UpsCommandsTest {
     volatile Consumer<Attributes> listener;
     final WebSocket socket;
     final List<Attributes> searchResult;
+    final boolean deferDelivery;
 
     ScriptedUpsService(WebSocket socket, List<Attributes> searchResult) {
+      this(socket, searchResult, false);
+    }
+
+    ScriptedUpsService(WebSocket socket, List<Attributes> searchResult, boolean deferDelivery) {
       super(
           UpsConfig.builder().baseUrl("http://127.0.0.1").requesterAet("WEASIS").build(),
           "WEASIS");
       this.socket = socket;
       this.searchResult = searchResult;
+      this.deferDelivery = deferDelivery;
     }
 
     @Override
@@ -283,6 +298,10 @@ class UpsCommandsTest {
     @Override
     public CompletableFuture<WebSocket> watch(Consumer<Attributes> listener) {
       this.listener = listener;
+      if (deferDelivery) {
+        // The test delivers the report itself, so it can park the append mid-flight.
+        return CompletableFuture.completedFuture(socket);
+      }
       Attributes report = new Attributes();
       report.setString(Tag.EventTypeID, VR.UI, "1.2.840.10008.1.2.6.1");
       report.setString(Tag.AffectedSOPInstanceUID, VR.UI, WORKITEM_UID);
@@ -319,6 +338,31 @@ class UpsCommandsTest {
               }
               return null;
             });
+  }
+
+  /** An events list whose {@code add} parks mid-flight, to race the close of the channel. */
+  private static final class BlockingEvents extends ArrayList<JsonObject> {
+    final CountDownLatch entered = new CountDownLatch(1);
+    final CountDownLatch release = new CountDownLatch(1);
+    final AtomicBoolean aborted;
+    final AtomicBoolean addedAfterAbort = new AtomicBoolean();
+
+    BlockingEvents(AtomicBoolean aborted) {
+      this.aborted = aborted;
+    }
+
+    @Override
+    public boolean add(JsonObject event) {
+      entered.countDown();
+      try {
+        release.await();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      boolean added = super.add(event);
+      addedAfterAbort.set(aborted.get());
+      return added;
+    }
   }
 
   @Test
@@ -566,6 +610,64 @@ class UpsCommandsTest {
   }
 
   @Test
+  void a_report_in_flight_when_the_channel_closes_cannot_land_after_the_close() throws Exception {
+    AtomicBoolean aborted = new AtomicBoolean();
+    WebSocket socket = fakeWebSocket(aborted);
+    ScriptedUpsService service = new ScriptedUpsService(socket, List.of(), true);
+    BlockingEvents events = new BlockingEvents(aborted);
+
+    UpsCommands.Watch command = new UpsCommands.Watch();
+    command.study = STUDY_UID;
+    command.timeout = 1;
+
+    Thread opener =
+        new Thread(
+            () -> {
+              try {
+                command.openChannel(service, events);
+              } catch (RuntimeException e) {
+                // surfaced through the assertions below
+              }
+            },
+            "openChannel");
+    opener.start();
+
+    // watch() stores the listener without delivering: deliver the report on a worker thread so
+    // its append parks mid-flight while the opener thread reaches the close.
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+    while (service.listener == null && System.nanoTime() < deadline) {
+      Thread.sleep(10);
+    }
+    assertNotNull(service.listener, "watch() must store the listener");
+
+    Attributes report = new Attributes();
+    report.setString(Tag.EventTypeID, VR.UI, "1.2.840.10008.1.2.6.1");
+    report.setString(Tag.AffectedSOPInstanceUID, VR.UI, WORKITEM_UID);
+    Thread deliverer = new Thread(() -> service.listener.accept(report), "report-deliverer");
+    deliverer.start();
+
+    // The callback has passed the closed check and is now parked inside the append.
+    assertTrue(events.entered.await(5, TimeUnit.SECONDS), "the report must enter the append");
+
+    // With the lock the close blocks until the append finishes; without it the close runs to the
+    // abort while the append is still parked. Wait for the abort, then release the append.
+    deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+    while (!aborted.get() && System.nanoTime() < deadline) {
+      Thread.sleep(20);
+    }
+    events.release.countDown();
+    deliverer.join(5000);
+    opener.join(5000);
+
+    assertFalse(deliverer.isAlive(), "the deliverer must have finished");
+    assertFalse(opener.isAlive(), "openChannel must have finished");
+    assertFalse(
+        events.addedAfterAbort.get(),
+        "an append that raced the close must land before the channel is closed");
+  }
+
+  @Test
+  @Timeout(10)
   void polling_sleeps_no_longer_than_the_remaining_timeout() throws Exception {
     ScriptedUpsService service = new ScriptedUpsService(null, List.of());
 

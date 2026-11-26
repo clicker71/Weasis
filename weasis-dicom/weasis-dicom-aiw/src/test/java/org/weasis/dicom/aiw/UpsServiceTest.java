@@ -270,6 +270,43 @@ class UpsServiceTest {
   }
 
   @Test
+  void a_workitem_referencing_the_study_in_a_later_request_item_suppresses_the_task()
+      throws Exception {
+    // Referenced Request Sequence may hold several requests (PS3.3 C.30.4): the study must match
+    // any item, not only the first, or Run would create a duplicate for an already covered study.
+    searchBody =
+        """
+        [{
+          "0020000D": {"vr": "UI", "Value": ["%s"]},
+          "00080018": {"vr": "UI", "Value": ["%s"]},
+          "00741000": {"vr": "CS", "Value": ["%s"]},
+          "0040A370": {"vr": "SQ", "Value": [
+            {"0020000D": {"vr": "UI", "Value": ["%s"]}},
+            {"0020000D": {"vr": "UI", "Value": ["%s"]}}
+          ]},
+          "00404018": {"vr": "SQ", "Value": [{
+            "00080100": {"vr": "SH", "Value": ["%s"]},
+            "00080102": {"vr": "SH", "Value": ["99CLARUS"]},
+            "00080104": {"vr": "LO", "Value": ["Organ segmentation"]}
+          }]}
+        }]
+        """
+            .formatted(
+                STUDY_UID,
+                WORKITEM_UID,
+                "SCHEDULED",
+                OTHER_STUDY_UID,
+                STUDY_UID,
+                "CT-ORGAN-SEG");
+
+    String uid = service().run(CODE, study(), List.of(instance()));
+
+    assertAll(
+        () -> assertEquals(WORKITEM_UID, uid),
+        () -> assertEquals(0, creates.get(), "the study matches the second request item"));
+  }
+
+  @Test
   void the_states_a_requestor_distinguishes_split_on_termination() {
     assertAll(
         () -> assertTrue(UpsService.isNonTerminal("SCHEDULED")),

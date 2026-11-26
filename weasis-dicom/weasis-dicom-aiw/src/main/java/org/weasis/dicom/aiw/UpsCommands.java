@@ -497,13 +497,16 @@ public class UpsCommands implements CommandExtension {
       }
       CountDownLatch first = new CountDownLatch(1);
       boolean[] refused = {false};
+      final Object lock = new Object();
       boolean[] closed = {false};
       CompletableFuture<WebSocket> channel =
           service.watch(
               report -> {
-                if (!closed[0]) {
-                  events.add(eventReport(report));
-                  first.countDown();
+                synchronized (lock) {
+                  if (!closed[0]) {
+                    events.add(eventReport(report));
+                    first.countDown();
+                  }
                 }
               });
       channel.whenComplete(
@@ -524,8 +527,11 @@ public class UpsCommands implements CommandExtension {
       }
       // The notification channel is a WebSocket (PS3.18 11.13, RAD-109): it stays open and keeps
       // delivering reports after the first one, so the Watcher closes it once it has its news.
-      // The flag silences the listener first, so a report racing the close cannot append again.
-      closed[0] = true;
+      // Close and the listener's check-and-append share one lock: a report that passed the check
+      // before the close cannot append after it, whatever the thread interleaving (JLS 17.4).
+      synchronized (lock) {
+        closed[0] = true;
+      }
       channel.thenAccept(WebSocket::abort);
       return !refused[0];
     }
