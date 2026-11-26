@@ -618,7 +618,9 @@ class UpsCommandsTest {
 
     UpsCommands.Watch command = new UpsCommands.Watch();
     command.study = STUDY_UID;
-    command.timeout = 1;
+    // No timeout: the wait ends only when the test interrupts the opener, so a slow test thread
+    // cannot let the close win the race before the append has entered.
+    command.timeout = 0;
 
     Thread opener =
         new Thread(
@@ -646,15 +648,15 @@ class UpsCommandsTest {
     Thread deliverer = new Thread(() -> service.listener.accept(report), "report-deliverer");
     deliverer.start();
 
-    // The callback has passed the closed check and is now parked inside the append.
-    assertTrue(events.entered.await(5, TimeUnit.SECONDS), "the report must enter the append");
+    // The callback has passed the closed check and is now parked inside the append. Waiting
+    // without a timeout: the channel stays open until the interrupt below, so this signal cannot
+    // be missed by a slow test thread.
+    events.entered.await();
 
-    // With the lock the close blocks until the append finishes; without it the close runs to the
-    // abort while the append is still parked. Wait for the abort, then release the append.
-    deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-    while (!aborted.get() && System.nanoTime() < deadline) {
-      Thread.sleep(20);
-    }
+    // Interrupt the opener: it leaves the wait and closes the channel, but the close shares the
+    // listener's lock, so it blocks while the append is parked. Release the append, then the close
+    // runs to the abort after the append has landed.
+    opener.interrupt();
     events.release.countDown();
     deliverer.join(5000);
     opener.join(5000);

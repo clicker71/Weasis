@@ -11,6 +11,7 @@ package org.weasis.dicom.aiw;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -23,6 +24,8 @@ import org.junit.jupiter.api.DisplayNameGeneration;
 import org.junit.jupiter.api.DisplayNameGenerator.ReplaceUnderscores;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.weasis.core.api.setting.Scope;
+import org.weasis.core.api.util.DocumentStore;
 import org.weasis.dicom.aiw.UpsNodes.Node;
 import org.weasis.dicom.explorer.DicomWebOrigin;
 
@@ -31,7 +34,8 @@ import org.weasis.dicom.explorer.DicomWebOrigin;
 class UpsNodesTest {
 
   @TempDir Path folder;
-  private Path installed;
+  private Path previous;
+  private boolean installed;
 
   private static Node node(String id, String url, boolean enabled) {
     return new Node(
@@ -47,13 +51,16 @@ class UpsNodesTest {
 
   @AfterEach
   void restoreDocument() {
-    UpsNodes.restore(installed);
+    if (installed) {
+      UpsNodes.restore(previous);
+    }
   }
 
   @Test
   void what_is_saved_is_read_back_and_a_server_left_out_is_removed() throws IOException {
     Path file = folder.resolve("upsNodes.json");
-    installed = UpsNodes.install(file);
+    previous = UpsNodes.install(file);
+    installed = true;
     UpsNodes.save(List.of(node("pacs", null, true), node("https://b/rs", "https://b/rs/", false)));
 
     List<Node> all = UpsNodes.all();
@@ -72,7 +79,8 @@ class UpsNodesTest {
 
   @Test
   void a_study_is_served_by_the_enabled_entry_whose_node_or_url_is_its_origin() throws IOException {
-    installed = UpsNodes.install(folder.resolve("upsNodes.json"));
+    previous = UpsNodes.install(folder.resolve("upsNodes.json"));
+    installed = true;
     UpsNodes.save(
         List.of(
             node("pacs", null, true),
@@ -107,15 +115,39 @@ class UpsNodesTest {
     Files.writeString(first, "{\"nodes\": [{\"id\": \"first\", \"enabled\": true}]}");
     Files.writeString(second, "{\"nodes\": [{\"id\": \"second\", \"enabled\": true}]}");
 
-    installed = UpsNodes.install(first);
+    previous = UpsNodes.install(first);
+    installed = true;
     assertEquals(List.of("first"), UpsNodes.all().stream().map(Node::id).toList());
-    Path previous = UpsNodes.install(second);
+    Path beforeSecond = UpsNodes.install(second);
     assertEquals(List.of("second"), UpsNodes.all().stream().map(Node::id).toList());
-    UpsNodes.restore(previous);
+    UpsNodes.restore(beforeSecond);
     assertEquals(
         List.of("first"),
         UpsNodes.all().stream().map(Node::id).toList(),
         "restore reads the document that was in force before");
+  }
+
+  @Test
+  void restore_after_an_install_before_any_read_reinitializes_the_default_document()
+      throws IOException {
+    // Point the default document at a real file: without a configured folder the lazy init has
+    // nothing to locate, and a memory-only document hides the difference this test is about.
+    DocumentStore.configure(folder.resolve("pref"), folder.resolve("config"));
+    Path defaultFile = DocumentStore.locate(Scope.USER, UpsNodes.DOCUMENT);
+    Files.createDirectories(defaultFile.getParent());
+    Files.writeString(defaultFile, "{\"nodes\": [{\"id\": \"default\", \"enabled\": true}]}");
+
+    // install before any read: the default document is not located yet, so there is no previous
+    // file and restore must put the initialization state back, not only the path.
+    previous = UpsNodes.install(folder.resolve("temp.json"));
+    installed = true;
+    assertNull(previous, "install before any read sees no previous document");
+    UpsNodes.restore(previous);
+
+    assertEquals(
+        List.of("default"),
+        UpsNodes.all().stream().map(Node::id).toList(),
+        "restore(null) must let the next read locate the default document again");
   }
 
   @Test

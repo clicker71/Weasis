@@ -168,6 +168,9 @@ public final class UpsNodes {
   /** Puts the document back on the file it used before a test install, for tests. */
   static synchronized void restore(Path previous) {
     NODES.configure(Optional.empty(), previous);
+    // A null previous means the default document was never located (install ran before any read):
+    // leave it unconfigured so the next read locates it again instead of staying memory-only.
+    configured = previous != null;
   }
 
   /** Every server of the document, enabled or not. */
