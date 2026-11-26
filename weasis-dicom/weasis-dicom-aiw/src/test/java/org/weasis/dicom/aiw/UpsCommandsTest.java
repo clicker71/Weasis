@@ -596,7 +596,6 @@ class UpsCommandsTest {
                     }),
             "in-flight-append");
     appender.start();
-    entered.await();
 
     // close() shares the monitor with accept(): it cannot enter while the append is parked, so
     // the closer must stay blocked, which is the mutual exclusion the channel relies on.
@@ -608,13 +607,22 @@ class UpsCommandsTest {
               closed.set(true);
             },
             "closer");
-    closer.start();
-    Thread.sleep(200);
-    assertFalse(closed.get(), "close must block while an append is in flight");
 
-    release.countDown();
-    appender.join(5000);
-    closer.join(5000);
+    try {
+      // Bounded wait: if the append never parks inside the gate (a regression in accept()), fail
+      // here instead of letting the appender park in release.await() forever.
+      assertTrue(entered.await(5, TimeUnit.SECONDS), "the append must enter the gate");
+
+      closer.start();
+      Thread.sleep(200);
+      assertFalse(closed.get(), "close must block while an append is in flight");
+    } finally {
+      // Release the parked append and collect both workers even when an assertion above throws, so
+      // a close() that returns while the append is in flight cannot leak the appender forever.
+      release.countDown();
+      appender.join(5000);
+      closer.join(5000);
+    }
 
     assertFalse(appender.isAlive(), "the append must have finished");
     assertFalse(closer.isAlive(), "close must have finished");
