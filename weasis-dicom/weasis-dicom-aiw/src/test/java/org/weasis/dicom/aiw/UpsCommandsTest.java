@@ -13,7 +13,6 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -275,19 +274,13 @@ class UpsCommandsTest {
     volatile Consumer<Attributes> listener;
     final WebSocket socket;
     final List<Attributes> searchResult;
-    final boolean deferDelivery;
 
     ScriptedUpsService(WebSocket socket, List<Attributes> searchResult) {
-      this(socket, searchResult, false);
-    }
-
-    ScriptedUpsService(WebSocket socket, List<Attributes> searchResult, boolean deferDelivery) {
       super(
           UpsConfig.builder().baseUrl("http://127.0.0.1").requesterAet("WEASIS").build(),
           "WEASIS");
       this.socket = socket;
       this.searchResult = searchResult;
-      this.deferDelivery = deferDelivery;
     }
 
     @Override
@@ -298,10 +291,6 @@ class UpsCommandsTest {
     @Override
     public CompletableFuture<WebSocket> watch(Consumer<Attributes> listener) {
       this.listener = listener;
-      if (deferDelivery) {
-        // The test delivers the report itself, so it can park the append mid-flight.
-        return CompletableFuture.completedFuture(socket);
-      }
       Attributes report = new Attributes();
       report.setString(Tag.EventTypeID, VR.UI, "1.2.840.10008.1.2.6.1");
       report.setString(Tag.AffectedSOPInstanceUID, VR.UI, WORKITEM_UID);
@@ -338,31 +327,6 @@ class UpsCommandsTest {
               }
               return null;
             });
-  }
-
-  /** An events list whose {@code add} parks mid-flight, to race the close of the channel. */
-  private static final class BlockingEvents extends ArrayList<JsonObject> {
-    final CountDownLatch entered = new CountDownLatch(1);
-    final CountDownLatch release = new CountDownLatch(1);
-    final AtomicBoolean aborted;
-    final AtomicBoolean addedAfterAbort = new AtomicBoolean();
-
-    BlockingEvents(AtomicBoolean aborted) {
-      this.aborted = aborted;
-    }
-
-    @Override
-    public boolean add(JsonObject event) {
-      entered.countDown();
-      try {
-        release.await();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-      boolean added = super.add(event);
-      addedAfterAbort.set(aborted.get());
-      return added;
-    }
   }
 
   @Test
@@ -610,62 +574,69 @@ class UpsCommandsTest {
   }
 
   @Test
-  void a_report_in_flight_when_the_channel_closes_cannot_land_after_the_close() throws Exception {
-    AtomicBoolean aborted = new AtomicBoolean();
-    WebSocket socket = fakeWebSocket(aborted);
-    ScriptedUpsService service = new ScriptedUpsService(socket, List.of(), true);
-    BlockingEvents events = new BlockingEvents(aborted);
+  void a_close_blocks_while_an_append_is_in_flight_and_rejects_what_follows() throws Exception {
+    WatchGate gate = new WatchGate();
+    CountDownLatch entered = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    AtomicInteger appended = new AtomicInteger();
 
-    UpsCommands.Watch command = new UpsCommands.Watch();
-    command.study = STUDY_UID;
-    // No timeout: the wait ends only when the test interrupts the opener, so a slow test thread
-    // cannot let the close win the race before the append has entered.
-    command.timeout = 0;
+    // Park an append inside the gate: it holds the monitor exactly as an in-flight report does.
+    Thread appender =
+        new Thread(
+            () ->
+                gate.accept(
+                    () -> {
+                      entered.countDown();
+                      try {
+                        release.await();
+                      } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                      }
+                      appended.incrementAndGet();
+                    }),
+            "in-flight-append");
+    appender.start();
+    entered.await();
 
-    Thread opener =
+    // close() shares the monitor with accept(): it cannot enter while the append is parked, so
+    // the closer must stay blocked, which is the mutual exclusion the channel relies on.
+    AtomicBoolean closed = new AtomicBoolean();
+    Thread closer =
         new Thread(
             () -> {
-              try {
-                command.openChannel(service, events);
-              } catch (RuntimeException e) {
-                // surfaced through the assertions below
-              }
+              gate.close();
+              closed.set(true);
             },
-            "openChannel");
-    opener.start();
+            "closer");
+    closer.start();
+    Thread.sleep(200);
+    assertFalse(closed.get(), "close must block while an append is in flight");
 
-    // watch() stores the listener without delivering: deliver the report on a worker thread so
-    // its append parks mid-flight while the opener thread reaches the close.
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-    while (service.listener == null && System.nanoTime() < deadline) {
-      Thread.sleep(10);
-    }
-    assertNotNull(service.listener, "watch() must store the listener");
+    release.countDown();
+    appender.join(5000);
+    closer.join(5000);
 
-    Attributes report = new Attributes();
-    report.setString(Tag.EventTypeID, VR.UI, "1.2.840.10008.1.2.6.1");
-    report.setString(Tag.AffectedSOPInstanceUID, VR.UI, WORKITEM_UID);
-    Thread deliverer = new Thread(() -> service.listener.accept(report), "report-deliverer");
-    deliverer.start();
+    assertFalse(appender.isAlive(), "the append must have finished");
+    assertFalse(closer.isAlive(), "close must have finished");
+    assertTrue(closed.get(), "close must have run once the append released the monitor");
+    assertEquals(1, appended.get(), "the in-flight append lands exactly once");
 
-    // The callback has passed the closed check and is now parked inside the append. Waiting
-    // without a timeout: the channel stays open until the interrupt below, so this signal cannot
-    // be missed by a slow test thread.
-    events.entered.await();
+    // Once closed, the gate rejects: an append that starts after close does not run.
+    gate.accept(appended::incrementAndGet);
+    assertEquals(1, appended.get(), "an append after close is rejected");
+  }
 
-    // Interrupt the opener: it leaves the wait and closes the channel, but the close shares the
-    // listener's lock, so it blocks while the append is parked. Release the append, then the close
-    // runs to the abort after the append has landed.
-    opener.interrupt();
-    events.release.countDown();
-    deliverer.join(5000);
-    opener.join(5000);
+  @Test
+  void accept_runs_the_append_until_the_gate_is_closed_and_then_rejects_it() {
+    WatchGate gate = new WatchGate();
+    AtomicInteger appended = new AtomicInteger();
 
-    assertFalse(deliverer.isAlive(), "the deliverer must have finished");
-    assertFalse(opener.isAlive(), "openChannel must have finished");
-    assertFalse(
-        events.addedAfterAbort.get(),
-        "an append that raced the close must land before the channel is closed");
+    gate.accept(appended::incrementAndGet);
+    assertEquals(1, appended.get(), "an append before the close runs");
+
+    gate.close();
+    gate.accept(appended::incrementAndGet);
+    assertEquals(1, appended.get(), "an append after the close is rejected");
   }
 
   @Test

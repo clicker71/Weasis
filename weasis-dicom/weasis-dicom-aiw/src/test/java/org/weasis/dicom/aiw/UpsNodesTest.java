@@ -36,6 +36,9 @@ class UpsNodesTest {
   @TempDir Path folder;
   private Path previous;
   private boolean installed;
+  private Path userFolderBefore;
+  private Path machineFolderBefore;
+  private boolean configuredStore;
 
   private static Node node(String id, String url, boolean enabled) {
     return new Node(
@@ -54,6 +57,23 @@ class UpsNodesTest {
     if (installed) {
       UpsNodes.restore(previous);
     }
+    // DocumentStore is process-wide too: the test that installs before any read re-points it, so
+    // put its folders back or later tests locate the default document in that test's temp folder.
+    if (configuredStore) {
+      DocumentStore.configure(prefDir(userFolderBefore), configDir(machineFolderBefore));
+    }
+  }
+
+  /** The preference dir whose {@code documents} folder {@code userFolder} is. */
+  private static Path prefDir(Path userFolder) {
+    // configure() resolves the documents folder under prefDir; strip it to get prefDir back.
+    return userFolder == null ? null : userFolder.getParent();
+  }
+
+  /** The configuration dir whose {@code machine/documents} folder {@code machineFolder} is. */
+  private static Path configDir(Path machineFolder) {
+    // configure() resolves machine then the documents folder under configDir; strip both.
+    return machineFolder == null ? null : machineFolder.getParent().getParent();
   }
 
   @Test
@@ -130,8 +150,16 @@ class UpsNodesTest {
   @Test
   void restore_after_an_install_before_any_read_reinitializes_the_default_document()
       throws IOException {
+    // NODES is a process-wide static: an earlier test that read the document has located the
+    // default file already. Reset the never-read state explicitly, or install would return that
+    // located file instead of null, whatever test ran first.
+    UpsNodes.restore(null);
+
     // Point the default document at a real file: without a configured folder the lazy init has
     // nothing to locate, and a memory-only document hides the difference this test is about.
+    userFolderBefore = DocumentStore.folder(Scope.USER);
+    machineFolderBefore = DocumentStore.folder(Scope.MACHINE);
+    configuredStore = true;
     DocumentStore.configure(folder.resolve("pref"), folder.resolve("config"));
     Path defaultFile = DocumentStore.locate(Scope.USER, UpsNodes.DOCUMENT);
     Files.createDirectories(defaultFile.getParent());
