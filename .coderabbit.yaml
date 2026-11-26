@@ -1,0 +1,49 @@
+# CodeRabbit review configuration for the weasis-dicom-aiw module in this
+# fork. Scope is deliberately narrow: only our UPS-RS Task Requester module
+# is reviewed, never the upstream Weasis codebase.
+
+reviews:
+  profile: assertive
+
+  path_filters:
+    - "!**"
+    - "weasis-dicom/weasis-dicom-aiw/**"
+
+  path_instructions:
+    - path: "weasis-dicom/weasis-dicom-aiw/**"
+      instructions: |
+        UPS-RS Task Requester / Watcher module (DICOMweb PS3.18 11). Hard
+        constraints:
+        - Verbs are search/run/cancel/watch/outputs/open/nodes and must map
+          to the RAD-8x transactions: Create 11.4/RAD-80, Retrieve
+          11.5/RAD-83, Update 11.6/RAD-84, ChangeState 11.7/RAD-82+RAD-85,
+          Search 11.9/RAD-81, Subscriptions 11.10/11.11/RAD-86; role = User
+          Agent 11.1. Any non-obvious comment must cite the transaction, not
+          paraphrase it.
+        - No study-level menu: UI attaches through the explorer hooks
+          (series context-menu contributor, thumbnail badge provider), never
+          by patching StudyPane/DicomExplorer directly.
+        - DICOMweb transport reuses weasis-core HttpUtils/MultipartBody and
+          the DICOMweb node preferences. No second HTTP stack, no new TLS or
+          auth code.
+        - Scheduled Processing Parameters Sequence (0074,1210) encoding
+          follows PS3.3 C.30.2 and the Content Item Macro (Table 10-2):
+          Value Type (0040,A040), Concept Name Code Sequence (0040,A043),
+          NUMERIC -> Numeric Value (0040,A30A) DS, TEXT -> Text Value
+          (0040,A160) UT, CODE -> Concept Code Sequence (0040,A168). Coding
+          scheme designators for local names use the private 99 prefix
+          (PS3.3 8.2). Never flatten a sequence-valued field into text.
+        - Workitem codes are identified by value AND designator (scheme);
+          a code alone is not an identity.
+        - pf4j plugin (Plugin-Id manifest, extension points), not OSGi:
+          no DS @Component, no felix.* keys.
+        - Comment style: KISS, WHY not WHAT, no AI traces, no process
+          artefacts or dates. Cite the standard instead of restating the
+          obvious.
+        - Java 25. Tests must be runnable headless; no test may depend on
+          network or a live DICOMweb origin.
+
+tone_instructions: |
+  Be concise, direct, and constructive. Prioritize DICOMweb conformance
+  (PS3.18 11 + RAD-8x) and wire-protocol correctness over style. State
+  findings as specific file:line evidence, not general advice.
